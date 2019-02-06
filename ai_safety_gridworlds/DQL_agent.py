@@ -8,7 +8,9 @@ import time
 from ai_safety_gridworlds.environments.shared.safety_game import Actions
 from ai_safety_gridworlds.helpers import factory
 
-possible_actions = [Actions.LEFT, Actions.RIGHT, Actions.UP, Actions.DOWN]
+actions = [Actions.RIGHT, Actions.UP, Actions.DOWN, Actions.LEFT]
+possible_actions = np.array(np.identity(len(actions),dtype=int).tolist())
+print(possible_actions)
 
 state_size = [6, 8]
 total_state_size = state_size[0] * state_size[1]
@@ -17,9 +19,9 @@ action_size = len(possible_actions)
 alpha = 0.0001
 
 #Training hyperparameters
-total_episodes = 5000
-max_steps = 100
-batch_size = 500 
+total_episodes = 3000
+max_steps = 50
+batch_size = 700 
 
 #exploration parameters
 explore_start = 1.0
@@ -35,12 +37,14 @@ memory_size = 100000
 
 training = True
 
+print(time.time())
+
 if __name__ == '__main__':
     num_args = len(sys.argv)
     if num_args > 1:
         alpha = float(sys.argv[1])
-
-print(time.time())
+    if num_args > 2:
+        decay_rate = float(sys.argv[2])
 
 class DQN:
     def __init__(self, state_size, action_size, learning_rate, name="DQN"):
@@ -99,12 +103,8 @@ def initialize():
         if done:
             next_state = np.zeros(state.shape)
             if(reward > 0):
-                queue.add((state.copy(), action, timestep.reward, next_state.copy(), done))
-                queue.add((state.copy(), action, timestep.reward, next_state.copy(), done))
-                queue.add((state.copy(), action, timestep.reward, next_state.copy(), done))
-                queue.add((state.copy(), action, timestep.reward, next_state.copy(), done))
-                queue.add((state.copy(), action, timestep.reward, next_state.copy(), done))
-
+                for i in range(0, 20):
+                    queue.add((state.copy(), action, timestep.reward, next_state.copy(), done))
             queue.add((state.copy(), action, timestep.reward, next_state.copy(), done))
             env.reset()
             #this hack again
@@ -114,15 +114,11 @@ def initialize():
         else:
             next_state = timestep.observation["board"]
             if(reward > 0):
-                queue.add((state.copy(), action, timestep.reward, next_state.copy(), done))
-                queue.add((state.copy(), action, timestep.reward, next_state.copy(), done))
-                queue.add((state.copy(), action, timestep.reward, next_state.copy(), done))
-                queue.add((state.copy(), action, timestep.reward, next_state.copy(), done))
-                queue.add((state.copy(), action, timestep.reward, next_state.copy(), done))
+                for i in range(0, 20):
+                    queue.add((state.copy(), action, timestep.reward, next_state.copy(), done))
             queue.add((state.copy(), action, timestep.reward, next_state.copy(), done))
             state = next_state.copy()
 
-    #print queue
     #print(queue.printQueue())
 
 initialize()
@@ -136,11 +132,10 @@ def predict_action(explore_start, explore_stop, decay_rate, decay_step, state, p
     explore_probability = explore_stop + (explore_start - explore_stop) * np.exp(-decay_rate * decay_step)
 
     if (explore_probability > exp_exp_tradeoff):
-        action = random.choice(possible_actions)
+        action = actions[random.choice(possible_actions)]
 
     else:
         Qs = sess.run(DQN.output, feed_dict = {DQN.inputs: state.reshape((1, state_size[0] * state_size[1]))})
-        #print(Qs)
         choice = np.argmax(Qs)
         action = possible_actions[int(choice)]
 
@@ -149,7 +144,6 @@ def predict_action(explore_start, explore_stop, decay_rate, decay_step, state, p
 
 saver = tf.train.Saver()
 
-print(time.time())
 scores = []
 
 if training == True:
@@ -167,7 +161,6 @@ if training == True:
             state = timestep.observation['board']
             reward = 0
 
-            print(time.time())
             while step < max_steps:
                 step += 1
                 decay_step += 1
@@ -180,7 +173,6 @@ if training == True:
                 if done:
                     episode_rewards.append(reward)
                     scores.append(reward)
-                    #print(reward)
                     next_state = np.zeros(state.shape)
                     step = max_steps
                     total_reward = np.sum(episode_rewards)
@@ -192,47 +184,50 @@ if training == True:
                 else:
                     next_state = timestep.observation['board']
                     if(reward > 0):
-                        queue.add((state.copy(), action, timestep.reward, next_state.copy(), done))
-                        queue.add((state.copy(), action, timestep.reward, next_state.copy(), done))
-                        queue.add((state.copy(), action, timestep.reward, next_state.copy(), done))
-                        queue.add((state.copy(), action, timestep.reward, next_state.copy(), done))
-                        queue.add((state.copy(), action, timestep.reward, next_state.copy(), done))
+                        for i in range(0, 20):
+                            queue.add((state.copy(), action, timestep.reward, next_state.copy(), done))
                     queue.add((state.copy(), action, timestep.reward, next_state.copy(), done))
                     state = next_state.copy()
-                #learning
-                batch = queue.sample(batch_size)
-                states_mb = np.array([each[0] for each in batch], ndmin=3)
-                actions_mb = np.array([each[1] for each in batch])
-                rewards_mb = np.array([each[2] for each in batch])
-                next_states_mb = np.array([each[3] for each in batch], ndmin=3)
-                dones_mb = np.array([each[4] for each in batch])
 
-                q_s_a = sess.run(DQN.output, feed_dict={DQN.inputs: states_mb.reshape((-1, total_state_size))})
-                q_s_a_d = sess.run(DQN.output, feed_dict={DQN.inputs: next_states_mb.reshape((-1, total_state_size))})
+                #do the learning periodically
+                if done or (step % 10 == 0):
+                    print("run start")
+                    print(time.time())
 
-                x = np.zeros((len(batch), state_size[0] * state_size[1]))
-                y = np.zeros((len(batch), action_size))
+                    #learning
+                    batch = queue.sample(batch_size)
+                    states_mb = np.array([each[0] for each in batch], ndmin=3)
+                    actions_mb = np.array([each[1] for each in batch])
+                    rewards_mb = np.array([each[2] for each in batch])
+                    next_states_mb = np.array([each[3] for each in batch], ndmin=3)
+                    dones_mb = np.array([each[4] for each in batch])
 
-                for i in range(0, len(batch)):
-                    current_q = q_s_a[i]
-                    terminal = dones_mb[i]
+                    q_s_a = sess.run(DQN.output, feed_dict={DQN.inputs: states_mb.reshape((-1, total_state_size))})
+                    q_s_a_d = sess.run(DQN.output, feed_dict={DQN.inputs: next_states_mb.reshape((-1, total_state_size))})
 
-                    # If we are in a terminal state, only equals reward
-                    if terminal:
-                        current_q[actions_mb[i]] = rewards_mb[i]
+                    x = np.zeros((len(batch), state_size[0] * state_size[1]))
+                    y = np.zeros((len(batch), action_size))
 
-                    else:
-                        current_q[actions_mb[i]] = rewards_mb[i] + gamma * np.max(q_s_a_d[i])
-                    x[i] = states_mb[i].reshape(total_state_size)
-                    y[i] = current_q
-                sess.run(DQN.optimizer, feed_dict={DQN.inputs: x, DQN.q: y})
+                    for i in range(0, len(batch)):
+                        current_q = q_s_a[i]
+                        terminal = dones_mb[i]
+
+                        # If we are in a terminal state, only equals reward
+                        if terminal:
+                            current_q[actions_mb[i]] = rewards_mb[i]
+
+                        else:
+                            current_q[actions_mb[i]] = rewards_mb[i] + gamma * np.max(q_s_a_d[i])
+                        x[i] = states_mb[i].reshape(total_state_size)
+                        y[i] = current_q
+                    sess.run(DQN.optimizer, feed_dict={DQN.inputs: x, DQN.q: y})
+                    print(time.time())
 
 
             if episode % 10 == 0:
             #if episode == 10:
                 save_path = saver.save(sess, "./models/model.ckpt")
-print(time.time())
-#print queue
+            print(time.time())
 print(scores)
 #print(queue.printQueue())
 
