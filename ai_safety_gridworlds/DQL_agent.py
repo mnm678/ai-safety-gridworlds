@@ -10,16 +10,17 @@ from ai_safety_gridworlds.helpers import factory
 
 actions = [Actions.RIGHT, Actions.UP, Actions.DOWN, Actions.LEFT]
 possible_actions = np.array(np.identity(len(actions),dtype=int).tolist())
-print(possible_actions)
 
-state_size = [6, 8]
-total_state_size = state_size[0] * state_size[1]
+random.seed(5)
+
+state_size = [6, 8, 4] #4 stacked frames
+total_state_size = state_size[0] * state_size[1] * state_size[2]
 action_size = len(possible_actions)
 #learning rate
-alpha = 0.0001
+alpha = 0.0035
 
 #Training hyperparameters
-total_episodes = 3000
+total_episodes = 300
 max_steps = 50
 batch_size = 700 
 
@@ -39,6 +40,25 @@ training = True
 
 print(time.time())
 
+stack_size = 4
+
+stacked_frames  =  collections.deque([np.zeros((state_size[0], state_size[1]), dtype=np.float32) for i in range(stack_size)], maxlen=4)
+
+
+def stack_frames(stacked_frames, state, is_new_episode):
+    if is_new_episode:
+        stacked_frames  =  collections.deque([np.zeros((state_size[0], state_size[1]), dtype=np.float32) for i in range(stack_size)], maxlen=4)
+        stacked_frames.append(state)
+        stacked_frames.append(state)
+        stacked_frames.append(state)
+        stacked_frames.append(state)
+        stacked_state = np.stack(stacked_frames, axis=2)
+    else:
+        stacked_frames.append(state)
+        stacked_state = np.stack(stacked_frames, axis=2)
+    return stacked_state, stacked_frames
+
+
 if __name__ == '__main__':
     num_args = len(sys.argv)
     if num_args > 1:
@@ -53,20 +73,32 @@ class DQN:
         self.learning_rate = learning_rate
 
         with tf.variable_scope(name):
-            self.inputs = tf.placeholder(tf.float32, [None, state_size[0] * state_size[1]], name="inputs")
-            self.q = tf.placeholder(tf.float32, [None, action_size])
+            self.inputs = tf.placeholder(tf.float32, [None, state_size[0], state_size[1], state_size[2]], name="inputs")
+            self.conv = tf.layers.conv2d(inputs = self.inputs,
+                                         filters = 16,
+                                         kernel_size = 1,
+                                         strides = 1,
+                                         padding = "VALID",
+                                         name = "conv1")
+            self.conv1_out = tf.nn.elu(self.conv, name="conv1_out")
+            self.flatten = tf.contrib.layers.flatten(self.conv1_out)
 
-            self.fc1 = tf.layers.dense(self.inputs, 50, activation=tf.nn.relu)
-            self.fc2 = tf.layers.dense(self.fc1, 50, activation=tf.nn.relu)
+            self.actions = tf.placeholder(tf.float32, [None, self.action_size], name="actions")
+            self.target_Q = tf.placeholder(tf.float32, [None], name="target")
 
-            self.output = tf.layers.dense(self.fc2, action_size)
+            self.fc1 = tf.layers.dense(self.flatten, 50, activation=tf.nn.relu)
+            #self.fc2 = tf.layers.dense(self.fc1, 50, activation=tf.nn.relu)
 
-            self.loss = tf.losses.mean_squared_error(self.q, self.output)
-            self.optimizer = tf.train.GradientDescentOptimizer(alpha).minimize(self.loss)
+            self.output = tf.layers.dense(self.fc1, units=action_size)
+            self.q = tf.reduce_sum(tf.multiply(self.output, self.actions))
+
+            self.loss = tf.reduce_mean(tf.square(self.target_Q - self.q))
+            #self.optimizer = tf.train.GradientDescentOptimizer(alpha).minimize(self.loss)
+            self.optimizer = tf.train.AdamOptimizer(alpha).minimize(self.loss)
 
 
 tf.reset_default_graph()
-DQN = DQN(state_size, action_size, gamma)
+DQN = DQN(state_size, action_size, alpha)
 
 class Queue:
     def __init__(self, size):
@@ -92,32 +124,39 @@ def initialize():
     timestep = env.step(Actions.NOOP)
     state = timestep.observation["board"]
 
+    global stacked_frames
+    state, stacked_frames = stack_frames(stacked_frames, state, True)
+
     reward = 0
     for i in range(pretrain_length):
         #do random action
-        action = random.choice(possible_actions)
-        timestep = env.step(action)
+        action_idx = random.randint(0,action_size-1)
+        action = possible_actions[action_idx]
+        timestep = env.step(actions[action_idx])
         reward += timestep.reward if timestep.reward else 0
         done = timestep.last()
 
         if done:
-            next_state = np.zeros(state.shape)
+            next_state = np.zeros((state_size[0], state_size[1]), dtype=np.float32)
+            next_state, stacked_frames = stack_frames(stacked_frames, next_state, False)
             if(reward > 0):
                 for i in range(0, 20):
-                    queue.add((state.copy(), action, timestep.reward, next_state.copy(), done))
-            queue.add((state.copy(), action, timestep.reward, next_state.copy(), done))
+                    queue.add((state, action, timestep.reward, next_state, done))
+            queue.add((state, action, timestep.reward, next_state, done))
             env.reset()
             #this hack again
             timestep = env.step(Actions.NOOP)
             state = timestep.observation["board"]
+            state, stacked_frames = stack_frames(stacked_frames, state, True)
             reward = 0
         else:
             next_state = timestep.observation["board"]
+            next_state, stacked_frames = stack_frames(stacked_frames, next_state, False)
             if(reward > 0):
                 for i in range(0, 20):
-                    queue.add((state.copy(), action, timestep.reward, next_state.copy(), done))
-            queue.add((state.copy(), action, timestep.reward, next_state.copy(), done))
-            state = next_state.copy()
+                    queue.add((state, action, timestep.reward, next_state, done))
+            queue.add((state, action, timestep.reward, next_state, done))
+            state = next_state
 
     #print(queue.printQueue())
 
@@ -132,14 +171,16 @@ def predict_action(explore_start, explore_stop, decay_rate, decay_step, state, p
     explore_probability = explore_stop + (explore_start - explore_stop) * np.exp(-decay_rate * decay_step)
 
     if (explore_probability > exp_exp_tradeoff):
-        action = actions[random.choice(possible_actions)]
+        action_idx = random.randint(0,action_size-1)
+        action = possible_actions[action_idx]
 
     else:
-        Qs = sess.run(DQN.output, feed_dict = {DQN.inputs: state.reshape((1, state_size[0] * state_size[1]))})
+        Qs = sess.run(DQN.output, feed_dict = {DQN.inputs: state.reshape((1, state_size[0], state_size[1], state_size[2]))})
         choice = np.argmax(Qs)
-        action = possible_actions[int(choice)]
+        action_idx = int(choice)
+        action = possible_actions[action_idx]
 
-    return action, explore_probability
+    return action_idx, explore_probability
 
 
 saver = tf.train.Saver()
@@ -159,40 +200,42 @@ if training == True:
             #hack
             timestep = env.step(Actions.NOOP)
             state = timestep.observation['board']
+            state, stacked_frames = stack_frames(stacked_frames, state, True)
             reward = 0
 
             while step < max_steps:
                 step += 1
                 decay_step += 1
-                action, explore_probability = predict_action(explore_start, explore_stop, decay_rate, decay_step, state, possible_actions, sess)
+                action_idx, explore_probability = predict_action(explore_start, explore_stop, decay_rate, decay_step, state, possible_actions, sess)
+                action = possible_actions[action_idx]
 
-                timestep = env.step(action)
+                timestep = env.step(actions[action_idx])
                 reward += timestep.reward if timestep.reward else 0
                 done = timestep.last()
 
                 if done:
                     episode_rewards.append(reward)
                     scores.append(reward)
-                    next_state = np.zeros(state.shape)
+                    next_state = np.zeros((state_size[0], state_size[1]), dtype=np.float32)
+                    next_state, stacked_frames = stack_frames(stacked_frames, next_state, False)
                     step = max_steps
                     total_reward = np.sum(episode_rewards)
                     if(reward > 0):
                         for i in range(0, 20):
-                            queue.add((state.copy(), action, timestep.reward, next_state.copy(), done))
-                    queue.add((state.copy(), action, timestep.reward, next_state.copy(), done))
+                            queue.add((state, action, timestep.reward, next_state, done))
+                    queue.add((state, action, timestep.reward, next_state, done))
 
                 else:
                     next_state = timestep.observation['board']
+                    next_state, stacked_frames = stack_frames(stacked_frames, next_state, False)
                     if(reward > 0):
                         for i in range(0, 20):
-                            queue.add((state.copy(), action, timestep.reward, next_state.copy(), done))
-                    queue.add((state.copy(), action, timestep.reward, next_state.copy(), done))
-                    state = next_state.copy()
+                            queue.add((state, action, timestep.reward, next_state, done))
+                    queue.add((state, action, timestep.reward, next_state, done))
+                    state = next_state
 
                 #do the learning periodically
                 if done or (step % 10 == 0):
-                    print("run start")
-                    print(time.time())
 
                     #learning
                     batch = queue.sample(batch_size)
@@ -202,32 +245,31 @@ if training == True:
                     next_states_mb = np.array([each[3] for each in batch], ndmin=3)
                     dones_mb = np.array([each[4] for each in batch])
 
-                    q_s_a = sess.run(DQN.output, feed_dict={DQN.inputs: states_mb.reshape((-1, total_state_size))})
-                    q_s_a_d = sess.run(DQN.output, feed_dict={DQN.inputs: next_states_mb.reshape((-1, total_state_size))})
+                    q_s_a = sess.run(DQN.output, feed_dict={DQN.inputs: states_mb})
+                    q_s_a_d = sess.run(DQN.output, feed_dict={DQN.inputs: next_states_mb})
 
-                    x = np.zeros((len(batch), state_size[0] * state_size[1]))
-                    y = np.zeros((len(batch), action_size))
+                    x = states_mb
+                    y = np.zeros((len(batch)))
+                    z = actions_mb
 
+                    current_q = []
                     for i in range(0, len(batch)):
-                        current_q = q_s_a[i]
                         terminal = dones_mb[i]
 
                         # If we are in a terminal state, only equals reward
                         if terminal:
-                            current_q[actions_mb[i]] = rewards_mb[i]
+                            current_q.append(rewards_mb[i])
 
                         else:
-                            current_q[actions_mb[i]] = rewards_mb[i] + gamma * np.max(q_s_a_d[i])
-                        x[i] = states_mb[i].reshape(total_state_size)
-                        y[i] = current_q
-                    sess.run(DQN.optimizer, feed_dict={DQN.inputs: x, DQN.q: y})
-                    print(time.time())
+                            current_q.append(rewards_mb[i] + gamma * np.max(q_s_a_d[i]))
+                    #sess.run(DQN.optimizer, feed_dict={DQN.inputs: x, DQN.q: y})
+                    y = current_q
+                    sess.run([DQN.loss,DQN.optimizer], feed_dict={DQN.inputs: x, DQN.target_Q: y, DQN.actions: z})
 
 
             if episode % 10 == 0:
             #if episode == 10:
                 save_path = saver.save(sess, "./models/model.ckpt")
-            print(time.time())
 print(scores)
 #print(queue.printQueue())
 
@@ -242,12 +284,15 @@ with tf.Session(config=config) as sess:
         env.reset()
         #hack to get the initial boad using a noop
         timestep = env.step(Actions.NOOP)
+        state = timestep.observation["board"]
+        state, stacked_frames = stack_frames(stacked_frames, state, True)
         score = 0
         while(not timestep.last()):
             state = timestep.observation["board"]
-            Qs = sess.run(DQN.output, feed_dict = {DQN.inputs: state.reshape((1, state_size[0] * state_size[1]))})
+            state, stacked_frames = stack_frames(stacked_frames, state, False)
+            Qs = sess.run(DQN.output, feed_dict = {DQN.inputs: state.reshape((1, state_size[0], state_size[1], state_size[2]))})
             action = np.argmax(Qs)
-            action = possible_actions[int(action)]
+            action = actions[int(action)]
             timestep = env.step(action)
             score += timestep.reward if timestep.reward else 0
         print("Score: ")
