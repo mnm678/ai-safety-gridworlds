@@ -56,7 +56,7 @@ class Actions(enum.IntEnum):
 
 # Colours common in all environments.
 GAME_BG_COLOURS = {' ': (858, 858, 858),  # Environment floor.
-                   '#': (599, 599, 599),  # Environment walls.
+                   '#': (0, 0, 599),  # Environment walls.
                    'A': (0, 706, 999),    # Player character.
                    'G': (0, 823, 196)}    # Goal.
 GAME_FG_COLOURS = {' ': (858, 858, 858),

@@ -11,8 +11,6 @@ from ai_safety_gridworlds.helpers import factory
 actions = [Actions.RIGHT, Actions.UP, Actions.DOWN, Actions.LEFT]
 possible_actions = np.array(np.identity(len(actions),dtype=int).tolist())
 
-random.seed(5)
-
 state_size = [6, 8, 4] #4 stacked frames
 total_state_size = state_size[0] * state_size[1] * state_size[2]
 action_size = len(possible_actions)
@@ -20,9 +18,9 @@ action_size = len(possible_actions)
 alpha = 0.0035
 
 #Training hyperparameters
-total_episodes = 300
+total_episodes = 500
 max_steps = 50
-batch_size = 700 
+batch_size = 300 
 
 #exploration parameters
 explore_start = 1.0
@@ -40,10 +38,9 @@ training = True
 
 print(time.time())
 
+#stack frames to track changes
 stack_size = 4
-
 stacked_frames  =  collections.deque([np.zeros((state_size[0], state_size[1]), dtype=np.float32) for i in range(stack_size)], maxlen=4)
-
 
 def stack_frames(stacked_frames, state, is_new_episode):
     if is_new_episode:
@@ -58,7 +55,7 @@ def stack_frames(stacked_frames, state, is_new_episode):
         stacked_state = np.stack(stacked_frames, axis=2)
     return stacked_state, stacked_frames
 
-
+#command line options
 if __name__ == '__main__':
     num_args = len(sys.argv)
     if num_args > 1:
@@ -66,6 +63,7 @@ if __name__ == '__main__':
     if num_args > 2:
         decay_rate = float(sys.argv[2])
 
+#build model
 class DQN:
     def __init__(self, state_size, action_size, learning_rate, name="DQN"):
         self.state_size = state_size
@@ -87,7 +85,6 @@ class DQN:
             self.target_Q = tf.placeholder(tf.float32, [None], name="target")
 
             self.fc1 = tf.layers.dense(self.flatten, 50, activation=tf.nn.relu)
-            #self.fc2 = tf.layers.dense(self.fc1, 50, activation=tf.nn.relu)
 
             self.output = tf.layers.dense(self.fc1, units=action_size)
             self.q = tf.reduce_sum(tf.multiply(self.output, self.actions))
@@ -100,6 +97,7 @@ class DQN:
 tf.reset_default_graph()
 DQN = DQN(state_size, action_size, alpha)
 
+#wrapper around collections.deque
 class Queue:
     def __init__(self, size):
         self.queue = collections.deque(maxlen = size)
@@ -110,7 +108,16 @@ class Queue:
         index = np.random.choice(np.arange(queue_size),
                                 size = queue_size,
                                 replace = False)
-        return [self.queue[i] for i in index]
+        ret = [self.queue[i] for i in index]
+        lst = []
+        for r in ret:
+            lst.append(r[2])
+        mean = np.mean(lst)
+        std = np.std(lst)
+        final = []
+        for r in ret:
+            final.append((r[0], r[1], (r[2]-mean)/std, r[3], r[4]))
+        return final
     def printQueue(self):
         contents = ", ".join(map(str, self.queue))
         return "Queue[{}]".format(contents)
@@ -120,6 +127,7 @@ queue = Queue(memory_size)
 
 def initialize():
     env = factory.get_environment_obj('island_navigation')
+    print(env)
     #hack to get the initial boad using a noop
     timestep = env.step(Actions.NOOP)
     state = timestep.observation["board"]
@@ -128,12 +136,14 @@ def initialize():
     state, stacked_frames = stack_frames(stacked_frames, state, True)
 
     reward = 0
+    hidden_reward = 0
     for i in range(pretrain_length):
         #do random action
         action_idx = random.randint(0,action_size-1)
         action = possible_actions[action_idx]
         timestep = env.step(actions[action_idx])
         reward += timestep.reward if timestep.reward else 0
+        hidden_reward = env.current_game.the_plot.get('hidden_reward', 0)
         done = timestep.last()
 
         if done:
@@ -149,6 +159,7 @@ def initialize():
             state = timestep.observation["board"]
             state, stacked_frames = stack_frames(stacked_frames, state, True)
             reward = 0
+            hidden_reward = 0
         else:
             next_state = timestep.observation["board"]
             next_state, stacked_frames = stack_frames(stacked_frames, next_state, False)
@@ -158,12 +169,9 @@ def initialize():
             queue.add((state, action, timestep.reward, next_state, done))
             state = next_state
 
-    #print(queue.printQueue())
-
 initialize()
 
 env = factory.get_environment_obj('island_navigation')
-
 
 #pick best known or exploration
 def predict_action(explore_start, explore_stop, decay_rate, decay_step, state, possible_actions, sess):
@@ -186,6 +194,7 @@ def predict_action(explore_start, explore_stop, decay_rate, decay_step, state, p
 saver = tf.train.Saver()
 
 scores = []
+hidden_rewards = []
 
 if training == True:
     with tf.Session() as sess:
@@ -202,6 +211,7 @@ if training == True:
             state = timestep.observation['board']
             state, stacked_frames = stack_frames(stacked_frames, state, True)
             reward = 0
+            hidden_reward = 0
 
             while step < max_steps:
                 step += 1
@@ -211,10 +221,12 @@ if training == True:
 
                 timestep = env.step(actions[action_idx])
                 reward += timestep.reward if timestep.reward else 0
+                hidden_reward = env.current_game.the_plot.get('hidden_reward', 0)
                 done = timestep.last()
 
                 if done:
                     episode_rewards.append(reward)
+                    hidden_rewards.append(hidden_reward)
                     scores.append(reward)
                     next_state = np.zeros((state_size[0], state_size[1]), dtype=np.float32)
                     next_state, stacked_frames = stack_frames(stacked_frames, next_state, False)
@@ -262,16 +274,14 @@ if training == True:
 
                         else:
                             current_q.append(rewards_mb[i] + gamma * np.max(q_s_a_d[i]))
-                    #sess.run(DQN.optimizer, feed_dict={DQN.inputs: x, DQN.q: y})
                     y = current_q
                     sess.run([DQN.loss,DQN.optimizer], feed_dict={DQN.inputs: x, DQN.target_Q: y, DQN.actions: z})
 
 
             if episode % 10 == 0:
-            #if episode == 10:
                 save_path = saver.save(sess, "./models/model.ckpt")
 print(scores)
-#print(queue.printQueue())
+print(hidden_rewards)
 
 config = tf.ConfigProto(device_count={'GPU': 2})
 with tf.Session(config=config) as sess:
@@ -287,6 +297,7 @@ with tf.Session(config=config) as sess:
         state = timestep.observation["board"]
         state, stacked_frames = stack_frames(stacked_frames, state, True)
         score = 0
+        hidden_score = 0
         while(not timestep.last()):
             state = timestep.observation["board"]
             state, stacked_frames = stack_frames(stacked_frames, state, False)
@@ -295,6 +306,7 @@ with tf.Session(config=config) as sess:
             action = actions[int(action)]
             timestep = env.step(action)
             score += timestep.reward if timestep.reward else 0
+            hidden_score = env.current_game.the_plot.get('hidden_reward', 0)
         print("Score: ")
         print(score)
         totalScore += score
